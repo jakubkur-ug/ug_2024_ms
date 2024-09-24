@@ -1,0 +1,492 @@
+---
+title: "mgr"
+author: "Jakub Kur"
+output: html_document
+---
+
+
+```{r setup}
+# Paczki
+library(tidyverse)
+library(uwot)
+library(ggplot2)
+library(ggpubr)
+library(gng)
+library(igraph)
+library(tidytext)
+library(rnndescent)
+library(plotly)
+library(Matrix)
+library(tidyverse)
+library(kableExtra)
+options(scipen = 999999999)
+```
+```{r data - country level, eval=FALSE, include=FALSE}
+df = readRDS(r'{data_country_level.RDS}')
+```
+```{r GA Tablica 3}
+# Statystyki Ogolne
+df %>% summarise(`Wyświetlenia` = sum(screenPageViews),
+                 `Sesje` = sum(sessions),
+                 `Użytkownicy` = sum(activeUsers),
+                 `Czas sesji` = sum(sessiontime),
+                 `Czas zaangażowanych sesji` = sum(userEngagementDuration),
+                 `Zaangażowane sesje` = sum(engagedSessions),
+                 `Odbicia` = sum(bounces)) %>%
+  mutate(
+    `Średnia ilość wyświetleń na dzień` = `Wyświetlenia`/122 %>% round(),
+    `Średnia ilość sesji na dzień` = `Sesje`/122 %>% round(),
+    `Średnia ilość użytkowników na dzień` = `Użytkownicy`/122 %>% round(),
+    `Średnia ilość wyswietleń na użytkownika` = `Wyświetlenia` / `Użytkownicy`,
+    `Średnia ilość sesji na użytkownika` = `Sesje`/`Użytkownicy`,
+    `Średnia wielkość wyświetleń na sesje` = `Wyświetlenia`/`Sesje`,
+    `Średni Czas sesji (sekundy)` = `Czas sesji`/`Sesje`,
+    `Średni Czas zaangażowanych sesji (sekundy)`= `Czas zaangażowanych sesji`/`Zaangażowane sesje`,
+    `Odsetek zaangażowanych sesji (%)` = `Zaangażowane sesje`/`Sesje`*100,
+    `Odsetek odbić (%)` = `Odbicia`/`Sesje`*100
+  ) %>% 
+  select(-`Czas sesji`, -`Czas zaangażowanych sesji`,-`Wyświetlenia`, -`Użytkownicy`, -`Zaangażowane sesje`,-`Odbicia`,-`Sesje`) %>%
+  tidyr::pivot_longer(cols = `Średnia ilość wyświetleń na dzień`:`Odsetek odbić (%)`) %>%
+  rename(Metryka = 'name', Wartość = 'value') %>%
+  kbl(digits = 2) %>%
+  kable_classic_2(full_width = F, html_font = "Times New Roman",bootstrap_options = "striped")
+```
+```{r GA Tablica 4}
+# Kraj
+df %>% group_by(country) %>% summarise(`Wyświetlenia` = sum(screenPageViews),
+                                       `Sesje` = sum(sessions),
+                                       `Użytkownicy` = sum(activeUsers),
+                                       `Czas sesji` = sum(sessiontime),
+                                       `Czas zaangażowanych sesji` = sum(userEngagementDuration),
+                                       `Zaangażowane sesje` = sum(engagedSessions),
+                                       `Odbicia` = sum(bounces)) %>%
+  mutate(
+    `Średni Czas sesji (sekundy)` = `Czas sesji`/`Sesje`,
+    `Średni Czas zaangażowanych sesji (sekundy)`= `Czas zaangażowanych sesji`/`Zaangażowane sesje`,
+    `Odsetek zaangażowanych sesji (%)` = `Zaangażowane sesje`/`Sesje`*100,
+    `Odsetek odbić (%)` = `Odbicia`/`Sesje`*100
+  ) %>%
+  #select(-`Czas sesji`, -`Czas zaangażowanych sesji`) %>%
+  #tidyr::pivot_longer(cols = Wyświetlenia:`Odsetek odbić (%)`) %>%
+  rename(Kraj = 'country') %>%
+  arrange(desc(Wyświetlenia)) %>%
+  ungroup() %>%
+  mutate(
+    `Odsetek wszystkich wyświetleń (%)` = `Wyświetlenia` / sum(`Wyświetlenia`)*100,
+    `Odsetek wszystkich sesji (%)` = `Sesje` / sum(`Sesje`)*100,
+    `Odsetek wszystkich użytkowników (%)` = `Użytkownicy` / sum(`Użytkownicy`)*100,
+    `Odsetek zaangażowanego czasu (%)` = `Czas zaangażowanych sesji` / sum(`Czas zaangażowanych sesji`)*100,
+    `Odsetek czasu sesji (%)` = `Czas sesji` / sum(`Czas sesji`)*100) %>% 
+  select(-`Czas sesji`, -`Czas zaangażowanych sesji`,-Wyświetlenia, -Sesje, -Użytkownicy, -`Zaangażowane sesje`,-Odbicia) %>%
+  arrange(desc(`Odsetek wszystkich użytkowników (%)`)) %>%
+  relocate(`Odsetek wszystkich użytkowników (%)`, .before = 2) %>%
+  mutate(`Skumulowany odsetek wszystkich użytkowników` = cumsum(`Odsetek wszystkich użytkowników (%)`)) %>%
+  relocate(`Skumulowany odsetek wszystkich użytkowników`, .before = 3) %>% 
+  head(20) %>%
+  kbl(digits = 2) %>%
+  kable_classic_2(full_width = F, html_font = "Times New Roman",bootstrap_options = "striped") %>%
+  row_spec(1:4, bold = TRUE)
+``` 
+```{r text GA top100}
+# TOP 100 - uzytkownicy, czas spedzony przez uzytkownikow
+df2 = df %>%
+  group_by(pagePath) %>% summarise(`Wyświetlenia` = sum(screenPageViews),
+                                   `Sesje` = sum(sessions),
+                                   `Użytkownicy` = sum(activeUsers),
+                                   `Czas sesji` = sum(sessiontime),
+                                   `Czas zaangażowanych sesji` = sum(userEngagementDuration),
+                                   `Zaangażowane sesje` = sum(engagedSessions),
+                                   `Odbicia` = sum(bounces)) %>%
+  filter(Użytkownicy>0,
+         `Czas zaangażowanych sesji`>0) %>%
+  mutate(
+    `Średni Czas sesji (sekundy)` = `Czas sesji`/`Sesje`,
+    `Średni Czas zaangażowanych sesji (sekundy)`= `Czas zaangażowanych sesji`/`Zaangażowane sesje`,
+    `Odsetek zaangażowanych sesji (%)` = `Zaangażowane sesje`/`Sesje`*100,
+    `Odsetek odbić (%)` = `Odbicia`/`Sesje`*100
+  ) %>% ungroup() %>%
+  transmute(
+    pagePath = pagePath,
+    `Użytkownicy (%)` = Użytkownicy /sum(Użytkownicy)*100 %>% round(2),
+    `Czas spędzony przez użytkowników (%)` = abs(`Czas zaangażowanych sesji`/sum(`Czas zaangażowanych sesji`))*100 %>% round(2)
+  ) %>%
+  arrange(desc(`Czas spędzony przez użytkowników (%)`))
+# 39.1 % wszystkich uzytkownikow zbiera 100 najpopularniejszych artykulow
+df2 %>%
+  arrange(desc(`Użytkownicy (%)`)) %>% 
+  mutate(`Skumulowana wartość odsetka użytkowników`= cumsum(`Użytkownicy (%)`)) %>% 
+  head(100) %>%
+  arrange(desc(`Skumulowana wartość odsetka użytkowników`))
+# 32.3 % calego czasu uzytkowania zbiera 100 najpopularniejszych artykulow
+df2 %>%
+  arrange(desc(`Czas spędzony przez użytkowników (%)`)) %>% 
+  mutate(`Skumulowana wartość odsetka czasu użytkowników`= cumsum(`Czas spędzony przez użytkowników (%)`)) %>%
+  head(100) %>%
+  arrange(desc(`Skumulowana wartość odsetka czasu użytkowników`))
+
+```
+```{r text Rysunek 4}
+# Rysunek 4 - wordclouds
+textdata = readRDS(r'{textdata.RDS}')  %>% as.tibble()
+# 39.1 % wszystkich uzytkownikow zbiera 100 najpopularniejszych artykulow - url
+(df2 %>%
+  arrange(desc(`Użytkownicy (%)`)) %>% 
+  mutate(`Skumulowana wartość odsetka użytkowników`= cumsum(`Użytkownicy (%)`)) %>% 
+  head(100) %>%
+  arrange(desc(`Skumulowana wartość odsetka użytkowników`)))$pagePath -> top100articlesbyusers
+# 32.3 % calego czasu uzytkowania zbiera 100 najpopularniejszych artykulow - url
+(df2 %>%
+  arrange(desc(`Czas spędzony przez użytkowników (%)`)) %>% 
+  mutate(`Skumulowana wartość odsetka czasu użytkowników`= cumsum(`Czas spędzony przez użytkowników (%)`)) %>%
+  head(100) %>%
+  arrange(desc(`Skumulowana wartość odsetka czasu użytkowników`)))$pagePath -> top100articlesbytimespent
+library(wordcloud)
+e2 = textdata %>% filter(url %in% top100articlesbytimespent)  %>% select(-url,-publish_date,-text) %>% unnest_tokens(word, title, token = "words") %>%
+  mutate(word = tolower(word) %>%
+           gsub("[^a-zA-Z0-9\\s]", "", .)) %>%
+  filter(!word %in% stop_words$word) %>%
+  mutate(word = gsub("\\d", "", word)) %>%
+  filter(word != '') %>%
+  group_by(word) %>% summarise(wordcount = n()) %>%
+  ungroup() %>% arrange(desc(wordcount)) %>% filter(!word %in% 'didnt')
+e2p = wordcloud(words = e2$word, freq = e2$wordcount, max.words = 20,random.order = F,random.color = T)
+
+e1 = textdata %>% filter(url %in% top100articlesbyusers)  %>% select(-url,-publish_date,-text) %>% unnest_tokens(word, title, token = "words") %>%
+  mutate(word = tolower(word) %>%
+           gsub("[^a-zA-Z0-9\\s]", "", .)) %>%
+  filter(!word %in% stop_words$word) %>%
+  mutate(word = gsub("\\d", "", word)) %>%
+  filter(word != '') %>%
+  group_by(word) %>% summarise(wordcount = n()) %>%
+  ungroup() %>% arrange(desc(wordcount)) %>% filter(!word %in% c('didnt','happened'))
+wordcloud(words = e1$word, freq = e1$wordcount, max.words = 20,random.order = F,random.color = T)
+
+```
+```{r funkcja zaangazowania}
+# dane testowe
+test = data.frame(
+  time = abs(rnorm(300,mean = 50, sd = 25)),
+  scroll = sample(x = 20:950/10, size = 300,replace = T)
+) %>% arrange(time,scroll)
+
+
+
+
+# Function to calculate the weighted engagement time
+weighted_engagement_time <- function(engagement_time, T_critical, T_max, w_t, w_t_increase) {
+  if (engagement_time <= T_critical) {
+    return(engagement_time / T_critical * w_t)  # Linear increase up to critical time
+  } else {
+    additional_time <- pmin(engagement_time - T_critical, T_max - T_critical)
+    additional_weight <- additional_time * w_t_increase
+    return((1 + additional_weight) * w_t)  # Increase weight linearly up to T_max
+  }
+}
+
+# Vectorize the weighted_engagement_time function
+vectorized_weighted_engagement_time <- Vectorize(weighted_engagement_time, 
+                                                 vectorize.args = c("engagement_time", "T_critical", "T_max", "w_t", "w_t_increase"))
+
+# Calculate User Engagement Metric (UEM) for vectors
+calculate_uem <- function(scroll_depth, engagement_time, w_s, w_t, T_critical, T_max, w_t_increase) {
+  weighted_times <- vectorized_weighted_engagement_time(engagement_time, T_critical, T_max, w_t, w_t_increase)
+  uem <- w_s * scroll_depth + weighted_times
+  return(uem)
+}
+
+
+
+EngagementMetric = calculate_uem(scroll_depth = test$scroll,
+                                 engagement_time = test$time,
+                                 w_s = 0.6,
+                                 w_t = 0.4,
+                                 w_t_increase = 2.25,
+                                 T_critical = 20,
+                                 T_max = 60)
+cbind(id = 1:300, test, EngagementMetric) %>%
+  arrange(scroll) %>% 
+  pivot_longer(time:EngagementMetric) %>%
+  ggplot(aes(x = id, y = value, color = name)) +
+  geom_point(data = . %>% filter(name == "EngagementMetric"), alpha = 0.5) +
+  geom_line(data = . %>% filter(name != "EngagementMetric"), alpha = 0.5) +
+  geom_smooth(data = . %>% filter(name == "EngagementMetric"), se = FALSE) +
+  
+  scale_color_manual(values = c("time" = "blue", "scroll" = "grey", "EngagementMetric" = "red"),
+                     labels = c("Wskaźnik Zaangażowania (loess)", "Poziom przewinięcia strony", "Spędzony czas")) +
+  labs(x = "ID", y = "Wartość", color = "Metryka") + theme_classic() +theme(legend.position = "bottom")
+
+```
+```{r ograniczenia, wyfiltrowane miasta i artykuly}
+data1 = readRDS(r'{data_us_region_city.RDS}')
+data2 = data1 %>% filter(city != '(not set)', country != '(not set)', pagePath != '(not set)', pagePath != r'{/}') %>%
+  mutate(
+    region_city = paste0(region,city)) %>%
+  group_by(pagePath,region_city) %>%
+  summarise(views = sum(screenPageViews ),
+            sessions = sum(sessions),
+            users = sum(activeUsers),
+            usernegtime = sum(userEngagementDuration),
+            engsess = sum(engagedSessions),
+            sessiontime = sum(sessiontime),
+            bounces = sum(bounces)) %>%
+  ungroup()
+# regiony i miasta do wyfiltrowania
+regioncities = data2 %>%
+  group_by(region_city) %>%
+  summarise(users = sum(users)) %>%
+  ungroup() %>%
+  mutate(users = users/sum(users)) %>%
+  arrange(desc(users)) %>%
+  mutate(cumsum = cumsum(users)) %>%
+  filter(cumsum< 0.85) %>% select(region_city)%>% unlist() %>% as.vector()
+# artykuly do wyfiltrowania
+pagepaths = data2 %>%
+  filter(region_city %in% regioncities) %>%
+  ungroup() %>%
+  filter(users >10 & usernegtime/users > 5) %>%
+  select(pagePath) %>% unlist() %>% as.vector() %>% unique()
+
+
+```
+```{r umap-gng clustering}
+data3 = readRDS(file =  r'{data_to_cluster.RDS}')
+
+um =  uwot::umap2(Matrix(data =  data3 %>% select(-region_city) %>% as.matrix(), sparse = T),
+                  n_components = 3, verbose = T,spread = 1, min_dist = 0.0125, n_neighbors = 20,
+                  metric = 'euclidean', init = 'spectral')
+
+ggpubr::ggarrange(
+  ggplot(as.data.frame(um), aes(x = V1, y = V2)) +
+    geom_point(color = 'black', alpha = 0.15)+theme_bw(),
+  ggplot(as.data.frame(um), aes(x = V2, y = V3)) +
+    geom_point(color = 'black', alpha = 0.15)+theme_bw(),
+  ggplot(as.data.frame(um), aes(x = V1, y = V3)) +
+    geom_point(color = 'black', alpha = 0.15)+theme_bw(), ncol = 3)
+
+
+plot_ly(as.data.frame(um),
+        type = 'scatter3d',
+        x = ~V1, y = ~V2, z = ~V3, opacity = 1)
+
+
+
+# pca = FactoMineR::PCA(data3 %>% select(-region_city),ncp = 3)
+# ggpubr::ggarrange(
+#   ggplot(as.data.frame(pca$svd$U), aes(x = V1, y = V2)) +
+#     geom_point(color = 'black', alpha = 0.15)+theme_bw(),
+#   ggplot(as.data.frame(pca$svd$U), aes(x = V2, y = V3)) +
+#     geom_point(color = 'black', alpha = 0.15)+theme_bw(),
+#   ggplot(as.data.frame(pca$svd$U), aes(x = V1, y = V3)) +
+#     geom_point(color = 'black', alpha = 0.15)+theme_bw())
+# plot_ly(as.data.frame(pca$svd$U),
+#         type = 'scatter3d',
+#         x = ~V1, y = ~V2, z = ~V3, opacity = 0.5)
+# 
+# km = kmeans(data3 %>% select(-region_city), centers = 3)
+# 
+# factoextra::fviz_nbclust(um, kmeans, method = 'silhouette')
+# factoextra::fviz_nbclust(um, kmeans, method = 'wss')
+
+##### GNG #max iter 50k
+x = gng::gng(um,
+             max_iter = 30000,
+             age_max = 20,
+             max_nodes = 75,
+             lambda = 400,
+             epsilon_b = 0.045,
+             epsilon_n = 0.001,
+             alpha = 0.15,
+             beta = 0.5)
+layout = as.data.frame(x$node_space)
+node_positions = data.frame(name = x$nodes$name, layout)
+geom_segment_data = x$edges %>% select(-age) %>%
+  left_join(node_positions, by = c('i' = 'name')) %>%
+  rename(start_x = "V1", start_y = "V2", start_z = "V3") %>%
+  left_join(node_positions, by = c('j' = 'name')) %>%
+  rename(end_x = "V1", end_y = "V2", end_z = "V3") %>%
+  select(-i,-j)
+ggpubr::ggarrange(
+  as.data.frame(um) %>%
+    ggplot(aes(x = V1,y = V2)) +
+    geom_point(color = "skyblue2", alpha = 0.2) + theme_bw() +
+    geom_segment(aes(x = start_x,
+                     y = start_y,
+                     xend = end_x,
+                     yend = end_y,
+                     linetype = 'dashed'),
+                 data = geom_segment_data, color = 'grey', show.legend = F) +
+    geom_point(data = data.frame(layout[1:3]), aes(x = V1, y = V2), 
+               color = 'red2', alpha = .66, size = 2),
+  
+  as.data.frame(um) %>%
+    ggplot(aes(x = V2,y = V3)) +
+    geom_point(color = "skyblue2", alpha = 0.2) + theme_bw() +
+    geom_segment(aes(x = start_y,
+                     y = start_z,
+                     xend = end_y,
+                     yend = end_z,
+                     linetype = 'dashed'),
+                 data = geom_segment_data, color = 'grey', show.legend = F) +
+    geom_point(data = data.frame(layout[1:3]), aes(x = V2, y = V3),
+               color = 'red3', alpha = .66, size = 2),
+  
+  as.data.frame(um) %>%
+    ggplot(aes(x = V1,y = V3)) + 
+    geom_point(color = "skyblue2", alpha = 0.2) + theme_bw() +
+    geom_segment(aes(x = start_x,
+                     y = start_z,
+                     xend = end_x,
+                     yend = end_z,
+                     linetype = 'dashed'),
+                 data = geom_segment_data, color = 'grey', show.legend = F) +
+    geom_point(data = data.frame(layout[1:3]), aes(x = V1, y = V3), 
+               color = 'red3', alpha = .66, size = 2), ncol = 3
+)
+
+x2 = igraph::graph_from_edgelist(
+  x$edges %>% select(-age) %>% as.matrix(),
+  directed = FALSE
+)
+
+gngclustered = data.frame(nodes = x$clustering) %>%
+  left_join(
+    data.frame(
+      nodes = split$names,
+      clust = split$membership),
+    by = 'nodes') %>% select(clust) %>% rename(clu = 'clust') %>% mutate(clu = as.factor(clu))
+
+
+split = igraph::decompose(x2)
+library(igraph)
+# gng edges decomposed
+clusterdata = data.frame()
+for(i in 1:length(split)){
+  clu = data.frame(
+    node = V(split[[i]]) %>% as.list() %>% names(),
+    clu = paste0('cluster_',i))
+  print(clu)
+  clusterdata = rbind(clusterdata, clu)
+}
+gngclustered = cbind(as.data.frame(um),
+                     node = x$clustering) %>%
+  left_join(clusterdata, by = 'node') %>% select(clu)
+
+gngclustered %>% group_by(clu) %>% summarise(count = n()) %>% arrange(desc(count))
+
+
+
+
+ggpubr::ggarrange(
+  as.data.frame(um) %>% mutate(gngclustered) %>%
+    ggplot(aes(x = V1,y = V2, color = clu)) + geom_point() + theme_bw() + theme(legend.position = "none"),
+  as.data.frame(um) %>% mutate(gngclustered) %>%
+    ggplot(aes(x = V2,y = V3, color = clu)) + geom_point() + theme_bw()+ theme(legend.position = "none"),
+  as.data.frame(um) %>% mutate(gngclustered) %>%
+    ggplot(aes(x = V1,y = V3, color = clu)) + geom_point() + theme_bw()+ theme(legend.position = "none"), ncol = 3)
+plot_ly(as.data.frame(um) %>% mutate(gngclustered),
+        type = 'scatter3d',
+        x = ~V1, y = ~V2, z = ~V3, opacity = 1, color = ~ clu, marker = list(size = 5))
+
+#saveRDS(um, file = r'{C:\Users\jakub\Desktop\msthesis\data\umapreducedspace.RDS}')
+#saveRDS(x, file = r'{C:\Users\jakub\Desktop\msthesis\data\gngresults.RDS}')
+
+```
+```{r statystyki dla grup - 1}
+data5 = readRDS(r'{scroll.RDS}')
+clusters = cbind(data3[,1],gngclustered) %>% as.tibble()
+data6  = data2 %>% ungroup() %>%
+  filter(pagePath %in% pagepaths,
+         region_city %in% regioncities,
+         users > 10,usernegtime/users > 5)  %>%
+  left_join(clusters, by = "region_city" ) %>%
+  left_join(data5, by = c("pagePath","region_city")) %>% arrange(scroll)
+
+data6 %>%
+  group_by(clu) %>%
+  mutate(totaltime = time * users) %>%
+  summarise(views = sum(views),
+            sessions = sum(sessions),
+            users = sum(users),
+            usernegtime = sum(usernegtime),
+            engsess = sum(engsess),
+            sessiontime = sum(sessiontime),
+            bounces = sum(bounces),
+            count_city = n_distinct(region_city),
+            count_url = n_distinct(pagePath))%>%
+  transmute(
+    Skupienie = clu,
+    
+    `Liczebność grupy (miasta)` = count_city,
+    `Ilość artykułów w grupie` = count_url,
+    
+    `Odsetek wyświetleń w całej populacji (%)` = views/sum(views)*100,
+    `Odsetek sesji w całej populacji (%)` = sessions/sum(sessions)*100,
+    `Odsetek użytkowników w całej populacji (%)` = users/sum(users)*100,
+    `Odsetek spędzonego czasu w całej populacji (%)` = usernegtime/sum(usernegtime)*100,
+    `Odsetek zaangażowanych sesji (%)` = engsess/sessions*100,
+    `Odsetek zaangażowanych sesji w całej populacji(%)` = engsess/sum(engsess)*100,
+    
+    `Wyświetlenia na sesje` = views/sessions,
+    `Wyświetlenia na użytkownika` = views/users,
+    
+    `Średni czas zaangażowania użytkownika (sekunda)` = usernegtime/users,
+    
+    
+  ) %>% t() %>%
+  as.data.frame() %>%
+  setNames(c('Grupa_1','Grupa_2','Grupa_3','Grupa_4','Grupa_5','Grupa_6','Grupa_7')) %>% 
+  .[-1, ] %>% mutate(across(Grupa_1:Grupa_7, as.numeric)) %>%
+  kbl(digits = 2) %>%
+  kable_classic_2(full_width = F, html_font = "Times New Roman",bootstrap_options = "striped")
+```
+```{r statystyki dla grup - 2}
+ggpubr::ggarrange(
+  data6 %>%
+    select(-1,-2) %>%
+    relocate(clu, .before = 1) %>%
+    mutate(Skupienie = str_replace(clu, "cluster_","Grupa_")) %>%
+    select(-clu) %>%
+    transmute(
+      Skupienie = Skupienie,
+      `Spędzony czas na użytkownika` = time, 
+      `Poziom przewinięcia` = scroll, 
+      `Zaangażowanie` = engagement_metric) %>%
+    pivot_longer(cols = c(`Spędzony czas na użytkownika`:`Zaangażowanie`)) %>%
+    filter(name == 'Zaangażowanie') %>%
+    ggplot(aes(x = value, y = Skupienie, fill = Skupienie)) +
+    geom_boxplot(alpha = 0.75) +
+    facet_wrap(.~name, scales = 'free_x', ncol = 1) + xlab("") + theme_bw()+ theme(legend.position = "none"),
+  data6 %>%
+    select(-1,-2) %>%
+    relocate(clu, .before = 1) %>%
+    mutate(Skupienie = str_replace(clu, "cluster_","Grupa_")) %>%
+    select(-clu) %>%
+    transmute(
+      Skupienie = Skupienie,
+      `Spędzony czas na użytkownika` = time, 
+      `Poziom przewinięcia` = scroll, 
+      `Zaangażowanie` = engagement_metric) %>%
+    pivot_longer(cols = c(`Spędzony czas na użytkownika`:`Zaangażowanie`)) %>%
+    filter(name == 'Spędzony czas na użytkownika') %>%
+    ggplot(aes(x = value, y = Skupienie, fill = Skupienie)) +
+    geom_boxplot(alpha = 0.75) +
+    facet_wrap(.~name, scales = 'free_x', ncol = 1) + xlab("") + theme_bw()+ theme(legend.position = "none") +
+    scale_x_continuous(trans = "log10", labels = scales::comma, limits = c(NA, NA)),
+  data6 %>%
+    select(-1,-2) %>%
+    relocate(clu, .before = 1) %>%
+    mutate(Skupienie = str_replace(clu, "cluster_","Grupa_")) %>%
+    select(-clu) %>%
+    transmute(
+      Skupienie = Skupienie,
+      `Spędzony czas na użytkownika` = time, 
+      `Poziom przewinięcia` = scroll, 
+      `Zaangażowanie` = engagement_metric) %>%
+    pivot_longer(cols = c(`Spędzony czas na użytkownika`:`Zaangażowanie`)) %>%
+    filter(name == 'Poziom przewinięcia') %>%
+    ggplot(aes(x = value, y = Skupienie, fill = Skupienie)) +
+    geom_boxplot(alpha = 0.75) +
+    facet_wrap(.~name, scales = 'free_x', ncol = 1) + xlab("") + theme_bw() + theme(legend.position = "bottom"), ncol = 2,nrow = 2)
+
+
+```
